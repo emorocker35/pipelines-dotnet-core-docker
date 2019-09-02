@@ -1,0 +1,125 @@
+name: $(Year:yy).$(date:MM).$(date:dd)$(rev:.r)
+variables:
+  BuildConfiguration: 'Release'
+
+trigger:
+  batch: true
+  branches:
+    include:
+    - master
+
+resources:
+  repositories:
+  - repository: self
+    checkoutOptions:
+      submodules: true
+
+pool:
+  vmImage: ubuntu-16.04
+steps:
+- task: HelmInstaller@0
+  displayName: 'Install Helm 2.9.1'
+
+- task: Docker@0
+  displayName: 'Build Application'
+  inputs:
+    azureSubscription: 'Rubbl Prod Azure'
+    azureContainerRegistry: '{"loginServer":"rubbl.azurecr.io", "id" : "/subscriptions/61816f28-a9a2-493e-b30f-3f367f8c4886/resourceGroups/Rubbl-Shared/providers/Microsoft.ContainerRegistry/registries/rubbl"}'
+    dockerFile: Dockerfile
+    buildArguments: 'PAT=$(System.AccessToken)'
+    imageName: 'market:ci-$(Build.BuildId)'
+    includeLatestTag: true
+
+- task: Docker@0
+  displayName: 'Push Application'
+  inputs:
+    azureSubscription: 'Rubbl Prod Azure'
+    azureContainerRegistry: '{"loginServer":"rubbl.azurecr.io", "id" : "/subscriptions/61816f28-a9a2-493e-b30f-3f367f8c4886/resourceGroups/Rubbl-Shared/providers/Microsoft.ContainerRegistry/registries/rubbl"}'
+    action: 'Push an image'
+    imageName: 'market:ci-$(Build.BuildId)'
+    includeLatestTag: true
+
+- task: Docker@1
+  displayName: 'Build Integration Tests'
+  inputs:
+    azureSubscriptionEndpoint: 'Rubbl Prod Azure'
+    azureContainerRegistry: rubbl.azurecr.io
+    dockerFile: 'Dockerfile-IntegrationTests'
+    arguments: '--build-arg PAT=$(System.AccessToken)'
+    imageName: 'market-tests:ci-$(Build.BuildId)'
+    includeLatestTag: true
+
+- task: Docker@1
+  displayName: 'Push an image'
+  inputs:
+    azureSubscriptionEndpoint: 'Rubbl Prod Azure'
+    azureContainerRegistry: rubbl.azurecr.io
+    command: 'Push an image'
+    imageName: 'market-tests:ci-$(Build.BuildId)'
+
+- task: Docker@1
+  displayName: 'Start Container'
+  inputs:
+    azureSubscriptionEndpoint: 'Rubbl Prod Azure'
+    azureContainerRegistry: rubbl.azurecr.io
+    command: 'Run an image'
+    imageName: 'market:ci-$(Build.BuildId)'
+    containerName: 'market-ci-$(Build.BuildId)'
+    entrypointOverride: bash
+
+- task: Docker@0
+  displayName: 'Run a Docker command'
+  inputs:
+    action: 'Run a Docker command'
+    customCommand: 'cp market-ci-$(Build.BuildId):/test-results ./test-results'
+
+- task: Docker@0
+  displayName: 'Run a Docker command'
+  inputs:
+    action: 'Run a Docker command'
+    customCommand: 'stop market-ci-$(Build.BuildId)'
+  condition: always()
+
+- task: PublishTestResults@2
+  displayName: 'Publish Test Results'
+  inputs:
+    testResultsFormat: JUnit
+    testResultsFiles: '**/*.xml'
+    searchFolder: '$(System.DefaultWorkingDirectory)/test-results'
+    failTaskOnFailedTests: true
+
+- task: PublishCodeCoverageResults@1
+  displayName: 'Publish code coverage'
+  inputs:
+    codeCoverageTool: Cobertura
+    summaryFileLocation: 'test-results/coverage/rubbl-web-website/cobertura-coverage.xml'
+    reportDirectory: test-results/coverage/rubbl-web-website
+    failIfCoverageEmpty: true
+
+- task: HelmDeploy@0
+  displayName: 'helm init'
+  inputs:
+    azureSubscription: 'Rubbl NonProd Azure'
+    azureResourceGroup: 'app-dev-southcentralus'
+    kubernetesCluster: 'dev-southcentralus-aks'
+    namespace: web
+    command: init
+    arguments: '--client-only'
+
+- task: HelmDeploy@0
+  displayName: 'helm package'
+  inputs:
+    azureSubscription: 'Rubbl NonProd Azure'
+    azureResourceGroup: 'app-dev-southcentralus'
+    kubernetesCluster: 'dev-southcentralus-aks'
+    namespace: web
+    command: package
+    chartPath: Rubbl.Web.Website/charts/market
+  
+- task: PublishBuildArtifacts@1
+  inputs:
+    pathtoPublish: 'infrastructure' 
+    artifactName: 'infrastructure' 
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Artifact: drop'
